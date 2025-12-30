@@ -1,5 +1,5 @@
 # AssemblyRainbow
-Draws a beautiful moving rainbow in i386 bios
+Draws a beautiful moving rainbow in i386 bios.
 ![Screenshot](https://raw.githubusercontent.com/Paul-Andre/AssemblyRainbow/master/Screenshot_2016-09-12_23-02-41.png)
 
 Assemble it:
