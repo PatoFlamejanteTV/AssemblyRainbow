@@ -1,127 +1,171 @@
 ;*********************************************
 ;	rainbow.asm
-;		- A Simple Bootloader
+;		- A Simple Bootloader (x64 Port)
 ;
-;	Operating Systems Development Tutorial
+;	Ported to x64 Long Mode
 ;*********************************************
- 
- 
-  
-%define W 80
-%define H 26
 
- 
-;-----------------------------------------------------------------------------
+%define VGA_MEM 0xB8000
+%define W 80
+%define H 25
 
 %define ORG 0x00007C00
 
-org ORG ; binary image loaded by BIOS at 07C0:0000
-
-bits 16 ; startup is done in real mode
-
-;-----------------------------------------------------------------------------
- 					; We are still in 16 bit Real Mode
-
+org ORG
+bits 16
 
 boot:
+    cli                         ; Disable interrupts
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7C00              ; Stack grows down from bootloader
 
+    ; Enable A20 Line (Fast Method)
+    in al, 0x92
+    or al, 2
+    out 0x92, al
 
+    ; Clear Page Tables (0x1000 - 0x3FFF)
+    mov di, 0x1000
+    mov cx, 0x1800              ; 3 tables * 4096 bytes / 2 (words)
+    xor ax, ax
+    rep stosw
 
-	mov ah,05h
-	mov al,02h
-	int 10h
-	
-	
-	mov ah,02h ;interupt
-	mov bh,02h ;page
-	mov dh,00h ;position x
-	mov dl,00h ;position y
-	int 10h
-	
-	mov WORD [index], colorsArray
-.l1 
+    ; Setup Page Tables
+    ; PML4 at 0x1000, PDP at 0x2000, PD at 0x3000
 
+    ; PML4[0] -> PDP
+    mov eax, 0x2003             ; 0x2000 | Present | Write
+    mov [0x1000], eax
 
+    ; PDP[0] -> PD
+    mov eax, 0x3003             ; 0x3000 | Present | Write
+    mov [0x2000], eax
 
+    ; PD[0] -> 2MB Page (Identity map 0-2MB)
+    mov eax, 0x0083             ; 0x0 | Present | Write | Huge (2MB)
+    mov [0x3000], eax
 
+    ; Load GDT
+    lgdt [gdt_descriptor]
 
+    ; Enable PAE
+    mov eax, cr4
+    or eax, 1 << 5
+    mov cr4, eax
 
-	mov bx,[index] ;
-	mov bl, [bx]
-	
-	mov ah,09h ;fonction int pour aff car
-	mov al, [letter] ;car a aff	
-	mov bh,02h ;page
-	;mov bl,[index] ;
-	mov cx, W ;rep
-	int 0x10  ; int bios 
-	
-	
-	mov ah,02h ;interupt
-	mov bh,02h ;page
-	mov dh, [position];position y
-	mov dl,0 ;position x
-	int 10h
-	
-	
-	inc BYTE [position]
-	cmp BYTE [position], H
-	jl .continue
-	
-		;wait
-		mov ah, 86h
-		mov cx, 0     ; higher word 
-		mov dx, 0x6000  ;lower word (number of microseconds)
-		int 15h;
-	
-	
-		mov BYTE [position],0;
-	
-		inc WORD [rainbowStartColor];
-	
-		mov WORD ax, [rainbowStartColor]
-		mov WORD [index], ax
-	
-		cmp WORD [rainbowStartColor],colorsEnd	
-	
-		jl .continue
-		
-			mov WORD [rainbowStartColor], colorsArray
-	
-			mov WORD ax, [rainbowStartColor]
-			mov WORD [index], ax
-	
-	.continue
-	
-	
-	
-	
-	inc WORD [index];
-	cmp WORD [index],colorsEnd
-	jl .l1
-	
-	mov WORD [index], colorsArray
-	
-	jmp .l1
+    ; Enable Long Mode in EFER MSR
+    mov ecx, 0xC0000080
+    rdmsr
+    or eax, 1 << 8
+    wrmsr
 
-end:	
-	cli
-	hlt
-	
-	
-data:	
-	colorsArray db 0x44,0x4c,0x6c,0xce,0xee,0xea,0xaa,0xbb,0x9b,0x99,0x19,0x59,0x55 ;,0x54
-	colorsEnd:  equ $
-	
-	rainbowStartColor dw colorsArray;
-	
-	letter db 0xb1
-	position db 0
-	index dw 0
+    ; Enable Paging and Protected Mode
+    mov eax, cr0
+    or eax, (1 << 31) | (1 << 0)
+    mov cr0, eax
 
+    ; Jump to 64-bit code
+    jmp 0x08:LongMode
 
-	
-;-----------------------------------------------------------------------------
-	times 510-($-$$) db 0	; the boot sector (512 bytes) must end with
-	db 0x55, 0xAA		; 55 AA to be loaded by BIOS
-;-----------------------------------------------------------------------------
+bits 64
+LongMode:
+    ; Set data segments to 0
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    ; Initialize drawing variables
+    mov rbx, VGA_MEM
+    xor r10, r10                ; r10 = rainbowStartColor index
+
+draw_loop:
+    xor r8, r8                  ; r8 = current row (y)
+
+.row_loop:
+    cmp r8, H
+    jge .row_done
+
+    ; Calculate color index for this row: (rainbowStartColor + y) % colorsLen
+    mov rax, r10
+    add rax, r8
+    xor rdx, rdx
+    mov rcx, colorsLen
+    div rcx                     ; rdx = remainder (index)
+
+    ; Get color
+    lea rsi, [colorsArray]
+    mov al, [rsi + rdx]         ; al = color attribute
+    mov ah, [letter]            ; ah = character (Wait, in VGA memory: Byte 0=Char, Byte 1=Attr)
+                                ; So word is (Attr << 8) | Char
+                                ; Let's assemble the word in ax.
+                                ; al was color. ah was char.
+                                ; We want low byte char, high byte color.
+    mov dl, al                  ; dl = color
+    mov al, [letter]            ; al = char
+    mov ah, dl                  ; ah = color
+                                ; Now ax = (color << 8) | char
+
+    ; Draw row (80 characters)
+    mov r9, 0                   ; r9 = col (x)
+.col_loop:
+    cmp r9, W
+    jge .col_done
+
+    ; Calculate memory address: VGA_MEM + (row * W + col) * 2
+    mov rdi, r8
+    imul rdi, W
+    add rdi, r9
+    shl rdi, 1
+    add rdi, VGA_MEM
+
+    mov [rdi], ax
+
+    inc r9
+    jmp .col_loop
+
+.col_done:
+    inc r8
+    jmp .row_loop
+
+.row_done:
+    ; Delay loop
+    mov rcx, 0x4000000           ; Adjust for speed
+.delay:
+    dec rcx
+    jnz .delay
+
+    ; Update rainbowStartColor
+    inc r10
+    cmp r10, colorsLen
+    jl .next_frame
+    xor r10, r10
+.next_frame:
+    jmp draw_loop
+
+; GDT Data
+align 4
+gdt_start:
+    dq 0x0000000000000000       ; Null Descriptor
+    dq 0x0020980000000000       ; Code Descriptor (64-bit, Present, Ring 0, Executable, Readable)
+    dq 0x0000920000000000       ; Data Descriptor (Present, Ring 0, Writable)
+gdt_end:
+
+gdt_descriptor:
+    dw gdt_end - gdt_start - 1
+    dd gdt_start
+
+; Data
+colorsArray db 0x44,0x4c,0x6c,0xce,0xee,0xea,0xaa,0xbb,0x9b,0x99,0x19,0x59,0x55
+colorsLen equ $ - colorsArray
+
+letter db 0xb1
+
+; Padding to 512 bytes
+times 510-($-$$) db 0
+db 0x55, 0xAA
